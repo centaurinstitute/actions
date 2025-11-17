@@ -1,105 +1,132 @@
-name: Build and Deploy
+name: Reusable Docker Build and Push
+
 on:
   workflow_call:
+    inputs:
+      service_name:
+        required: true
+        type: string
+        description: 'Service name (e.g., greycollar, communication, prometheus, grafana)'
+      environment:
+        required: true
+        type: string
+        description: 'Environment: live or land'
+      context_path:
+        required: false
+        type: string
+        default: '.'
+        description: 'Docker build context path'
+      install_dependencies:
+        required: false
+        type: boolean
+        default: false
+        description: 'Whether to run npm ci'
+      dependency_path:
+        required: false
+        type: string
+        default: '.'
+        description: 'Path where to run npm ci'
+      run_lint:
+        required: false
+        type: boolean
+        default: false
+        description: 'Whether to run linting'
+      run_build:
+        required: false
+        type: boolean
+        default: false
+        description: 'Whether to run npm build'
+      setup_config:
+        required: false
+        type: boolean
+        default: false
+        description: 'Whether to setup config files for the environment'
+      docker_username:
+        required: false
+        type: string
+        description: 'Docker username'
+        default: canmingir
+      config_paths:
+        required: false
+        type: string
+        description: 'Optional: Comma-separated paths for multiple configs (e.g., "./dashboard,./api")'
+      setup_version:
+        required: false
+        type: boolean
+        default: false
+        description: 'Whether to setup version.json'
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
     steps:
       - name: Check Out Repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Set repo name
-        id: repo
+      - name: Set config files
+        if: ${{ inputs.setup_config }}
         run: |
-          echo "REPO=$(echo ${{ github.repository }} | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-
-      - name: Set container name
-        id: container
-        run: |
-          if [[ "${{ github.workflow }}" == "Land" ]]; then
-            echo "CONTAINER=$(echo $REPO | cut -d'/' -f2 | tr '.' '-')-land" >> $GITHUB_ENV
-          elif [[ "${{ github.workflow }}" == "Deploy" ]]; then
-            echo "CONTAINER=$(echo $REPO | cut -d'/' -f2 | tr '.' '-')-live" >> $GITHUB_ENV
-          else
-            echo "Invalid workflow name for use this workflow. Please use either "Land" or "Deploy" as workflow name"
-            exit 1
+          CONFIG_PATHS="${{ inputs.config_paths }}"
+          
+          if [ -z "$CONFIG_PATHS" ]; then
+            CONFIG_PATHS="."
           fi
-
-      - name: Set image tag
-        id: tag
-        run: |
-          if [[ "${{ github.workflow }}" == "Land" ]]; then
-             echo "TAG=land-${{ github.run_id }}" >> $GITHUB_ENV
-          elif [[ "${{ github.workflow }}" == "Deploy" ]]; then
-             echo "TAG=latest-${{ github.run_id }}" >> $GITHUB_ENV
-          else
-            echo "Invalid workflow name for use this workflow. Please use either "Land" or "Deploy" as workflow name"
-            exit 1
-          fi
-
-      - name: Get repo topics
-        id: get_topics
-        run: |
-          TOKEN=${{ secrets.GITHUB_TOKEN }}
-          REPO=${{ github.repository }}
-          RESPONSE=$(curl -s -H "Accept: application/vnd.github.mercy-preview+json" -H "Authorization: token $TOKEN" https://api.github.com/repos/$REPO/topics)
-          TOPICS=$(echo $RESPONSE | jq -r '.names[]' | tr '\n' ',')
-          echo "Repo topics are $TOPICS"
-          echo "TOPICS=$TOPICS" >> $GITHUB_ENV
-
-      - name: Get branch name
-        id: get_branch
-        run: |
-          BRANCH=$(echo ${{ github.ref }} | cut -d'/' -f3)
-          echo "Branch is $BRANCH"
-          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
-
-      - name: Print Repo Info
-        run: |
-          echo "Repo: $REPO"
-          echo "Container: $CONTAINER"
-          echo "Tag: $TAG" 
-          echo "Topics: $TOPICS"
-          echo "Branch: $BRANCH"
-
-      - name: Set config file
-        if: ${{!contains(env.TOPICS, 'website')}}
-        run: |
-          if [[ "${{ github.workflow }}" == "Land" ]]; then
-            cp config.land.js config.js
-          elif [[ "${{ github.workflow }}" == "Deploy" ]]; then
-            cp config.live.js config.js
-          fi
+          
+          IFS=',' read -ra PATHS <<< "$CONFIG_PATHS"
+          for path in "${PATHS[@]}"; do
+            path=$(echo "$path" | xargs)  # Trim whitespace
+            
+            if [ -f "${path}/config.${{ inputs.environment }}.js" ]; then
+              cp ${path}/config.${{ inputs.environment }}.js ${path}/config.js
+              echo "✓ Copied JS config for ${path}"
+            fi
+            
+            if [ -f "${path}/config.${{ inputs.environment }}.ts" ]; then
+              cp ${path}/config.${{ inputs.environment }}.ts ${path}/config.ts
+              echo "✓ Copied TS config for ${path}"
+            fi
+          done
 
       - name: Update version.json
-        if: ${{!contains(env.TOPICS, 'website')}}
+        if: ${{ inputs.setup_version }}
         run: |
-          echo "{ \"version\": \"$BRANCH\" }" > ./src/version.json
+          CONFIG_PATHS="${{ inputs.config_paths }}"
+          
+          if [ -z "$CONFIG_PATHS" ]; then
+            CONFIG_PATHS="."
+          fi
+          
+          IFS=',' read -ra PATHS <<< "$CONFIG_PATHS"
+          FIRST_PATH=$(echo "${PATHS[0]}" | xargs)
+
+          if [ -d "${FIRST_PATH}/src" ]; then
+            echo "{ \"version\": \"${{ github.ref_name }}\" }" > ${FIRST_PATH}/src/version.json
+            echo "✓ Updated version.json in ${FIRST_PATH}/src"
+          fi
 
       - name: Install Dependencies
-        run: npm ci
+        if: ${{ inputs.install_dependencies }}
+        run: |
+          cd ${{ inputs.dependency_path }}
+          npm ci
+
+      - name: Check lint
+        if: ${{ inputs.run_lint }}
+        run: npm run lint
 
       - name: Build
-        if: ${{!contains(env.TOPICS, 'node')}}
+        if: ${{ inputs.run_build }}
         run: npm run build
 
       - name: Log in to Docker Hub
-        env:
-          DOCKER_ACCESS_TOKEN: ${{ secrets.DOCKER_ACCESS_TOKEN }}
-        uses: docker/login-action@v1
+        uses: docker/login-action@v3
         with:
-          username: canmingir
+          username: centaurai
           password: ${{ secrets.DOCKER_ACCESS_TOKEN }}
 
       - name: Build and Push Docker Image
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v5
         with:
           push: true
-          tags: |
-            canmingir/${{env.REPO}}:latest
-            canmingir/${{env.REPO}}:${{env.TAG}}
-          context: .
+          tags: centaurai/${{ inputs.service_name }}-${{ inputs.environment }}:latest
+          context: ${{ inputs.context_path }}
