@@ -50,6 +50,8 @@ on:
         type: boolean
         default: false
         description: 'Whether to setup version.json'
+    secrets:
+      DOCKER_ACCESS_TOKEN: ${{ secrets.DOCKER_ACCESS_TOKEN }}
 
 jobs:
   build-and-push:
