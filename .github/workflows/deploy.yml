@@ -121,5 +121,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           push: true
-          tags: centaurai/${{ inputs.service_name }}-${{ inputs.environment }}:latest
+          tags: | 
+            centaurai/${{ inputs.service_name }}-${{ inputs.environment }}:latest
+            centaurai/${{ inputs.service_name }}-${{ inputs.environment }}:${{ github.sha }}
           context: ${{ inputs.context_path }}
